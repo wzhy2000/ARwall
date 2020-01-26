@@ -1,0 +1,2 @@
+include ':app', ':ndk_helper', ':opencv'
+rootProject.name='ARwall'
