@@ -12,8 +12,8 @@
 #include <string>
 #include <mutex>
 
-#define MIN_KPS_IN_FRAME            300     // need to detect at least these keypoints in reference image
-#define MIN_INLIER_COUNT            15      // should have at least these many matches
+#define MIN_KPS_IN_FRAME            250     // need to detect at least these keypoints in reference image
+#define MIN_INLIER_COUNT            20      // should have at least these many matches
 #define CAM_DISTANCE_FROM_WALL      75      // assumed distance between device and wall
 #define NN_MATCH_RATIO              0.8f    // Nearest-neighbour matching ratio
 #define RANSAC_THRESH               2.5f    // RANSAC inlier threshold for solvePnp
@@ -74,6 +74,7 @@ private:
     cv::Mat translationVector, rotationVector;
     cv::Mat translationVectorCopy, rotationVectorCopy;
     float matchedVertices[8];
+    float shakeVertices[8];
 
     std::vector <float> gravity;
     glm::vec3   sourceGravityVector;

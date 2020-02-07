@@ -9,9 +9,10 @@
 SimpleARClass::SimpleARClass() {
 
     MyLOGD("SimpleARClass::SimpleARClass");
-    initsDone           = false;
     debugIsOn           = false;
     reduceMarkShake     = true;
+
+    initsDone           = false;
     trackingIsOn        = false;
     renderPicture       = false;
     pnpResultIsMatch    = false;
@@ -34,6 +35,7 @@ SimpleARClass::SimpleARClass() {
     rotationVectorCopy      = cv::Mat::zeros(3,1,CV_32F);
 
     for(int i=0;i<8;i++) matchedVertices[i] = 0.0f;
+    for(int i=0;i<8;i++) shakeVertices[i] = 0.0f;
 }
 
 SimpleARClass::~SimpleARClass() {
@@ -69,8 +71,8 @@ void SimpleARClass::PerformGLInits() {
     // extract the OBJ and companion files from assets
     std::string objMarkFile, objDisplayFile;
     bool isMarksPresent =
-            gHelperObject->ExtractAssetReturnFilename("marks/MK_0_1_0b.jpg", objMarkFile) &&
-            gHelperObject->ExtractAssetReturnFilename("displays/display_b0.jpg", objDisplayFile);
+            gHelperObject->ExtractAssetReturnFilename("marks/mark.jpg", objMarkFile) &&
+            gHelperObject->ExtractAssetReturnFilename("displays/display_b.jpg", objDisplayFile);
 
     if( !isMarksPresent ) {
         MyLOGE("Mark file %s, %s does not exist!", objMarkFile.c_str(), objDisplayFile.c_str() );
@@ -80,7 +82,8 @@ void SimpleARClass::PerformGLInits() {
     LoadMarkFiles();
 
     myTextPic = new TextPicture(cameraPreviewWidth*previewScaleFactor,
-                                cameraPreviewHeight*previewScaleFactor);
+                                cameraPreviewHeight*previewScaleFactor,
+                                markImgWidth, markImgHeight);
 
     myTextPic->Load(objDisplayFile);
 
@@ -92,7 +95,8 @@ void SimpleARClass::PerformGLInits() {
 void SimpleARClass::LoadMarkFiles()
 {
     std::string objMarkFile;
-    gHelperObject->ExtractAssetReturnFilename("marks/MK_0_1_0b.jpg", objMarkFile);
+    gHelperObject->ExtractAssetReturnFilename("marks/mark.jpg", objMarkFile);
+    int nMarkBlock=7;
 
     MyLOGI("Loading texture %s", objMarkFile.c_str());
 
@@ -100,10 +104,10 @@ void SimpleARClass::LoadMarkFiles()
     if (!markImage.empty()) {
 
         // resize the camera preview image to a smaller size to speedup processing
-        float xScaleFactor = cameraPreviewWidth*previewScaleFactor/markImage.cols;
-        float yScaleFactor = cameraPreviewHeight*previewScaleFactor/markImage.rows;
+        //float xScaleFactor = cameraPreviewWidth*previewScaleFactor/(markImage.cols/nMarkBlock);
+        //float yScaleFactor = cameraPreviewHeight*previewScaleFactor/markImage.rows;
 
-        cv::resize(markImage,markImage, cv::Size(), xScaleFactor, yScaleFactor);
+        //cv::resize(markImage,markImage, cv::Size(), xScaleFactor, yScaleFactor);
 
         // OpenCV image needs to be flipped for OpenGL
         cv::flip(markImage, markImage, 0);
@@ -112,7 +116,8 @@ void SimpleARClass::LoadMarkFiles()
         markImgHeight = markImage.rows;
 
         //Detect feature points and descriptors in reference image
-        cornerDetector->detectAndCompute(markImage, cv::noArray(),
+        cv::Ptr<cv::Feature2D> bigCornerDetector = cv::ORB::create(4000);
+        bigCornerDetector->detectAndCompute(markImage, cv::noArray(),
                                          referenceKeypoints, referenceDescriptors);
 
         MyLOGD("Number of feature points in mark file %d", (int) referenceKeypoints.size());
@@ -250,7 +255,9 @@ void SimpleARClass::Render() {
         gravityMutex.unlock();
 
         if (renderPicture) {
-             myTextPic->Render(&mvpMat, matchedVertices, 1.0);
+            cameraMutex.try_lock();
+            myTextPic->Render(&mvpMat);
+            cameraMutex.unlock();
         } else {
             //For debug
             //MyLOGD("***not rendering model***");
@@ -350,10 +357,10 @@ bool SimpleARClass::MatchKeypointsInQueryImage() {
     cv::Mat queryDescriptors;
 
     // compute keypoints and their descriptors in the query image
-    cameraMutex.lock();
+    //cameraMutex.lock();
     cornerDetector->detectAndCompute(cameraImageForBack, cv::noArray(), queryKeypoints,
                                      queryDescriptors);
-    cameraMutex.unlock();
+    //cameraMutex.unlock();
 
     MyLOGD("Number of kps in query frame %d", (int) queryKeypoints.size());
     if (queryKeypoints.size() == 0) {
@@ -408,32 +415,40 @@ bool SimpleARClass::MatchKeypointsInQueryImage() {
     }
     MyLOGD("Success, Number of keypoint matches = %d", (int)sourceInlierKeypoints.size());
 
-    // draw blue bigger circles in current image for the matched key points
-    if(debugIsOn)
-       DrawMatchedKeypoints( queryInlierKeypoints);
-
     // matched vertices are calculated for the text picture positioning.
-    float newMatchVertices[8]={0};
-    CalcShiftedCorners( homography, markImgWidth, markImgHeight, newMatchVertices);
+    float newShakeVertices[8]={0};
+    CalcShiftedCorners( homography, screenWidth, screenHeight, newShakeVertices);
 
     // in order to reduce the shaking of text picture, we ignore the slight movements.
-    if (!reduceMarkShake)
-       for(int i=0;i<8;i++) matchedVertices[i] = newMatchVertices[i];
-    else {
+    if (!reduceMarkShake){
+        // the mapped image is too small ( zoom out to a point );
+        if ( !myTextPic->MappingTrianglePoints(homography) )
+            return false;
+
+    } else {
         float deltPos = 0.0f, absDelt = 0.0f;
         for (int i = 0; i < 8; i++) {
-            deltPos += newMatchVertices[i] - matchedVertices[i];
-            absDelt += std::abs(newMatchVertices[i] - matchedVertices[i]);
+            deltPos += newShakeVertices[i] - shakeVertices[i];
+            absDelt += std::abs(newShakeVertices[i] - shakeVertices[i]);
         }
 
         // We can ignore the movements caused by shaking.
-        if (deltPos > 8*1 || absDelt > 8 * 15)
-            for (int i = 0; i < 8; i++) matchedVertices[i] = newMatchVertices[i];
+        if (deltPos > 8 * 2 || absDelt > 8 * 10) {
+            CalcShiftedCorners(homography, screenWidth, screenHeight, shakeVertices);
+            // the mapped image is too small ( zoom out to a point );
+            if ( !myTextPic->MappingTrianglePoints(homography) )
+                return false;
+        }
     }
 
-    // draw a rectangle marking reference frame in current image
-    if (debugIsOn)
+    CalcShiftedCorners( homography, markImgWidth, markImgHeight, matchedVertices);
+
+    if(debugIsOn) {
+        // draw blue bigger circles in current image for the matched key points
+        DrawMatchedKeypoints(queryInlierKeypoints);
+        // draw a rectangle marking reference frame in current image
         DrawFrameAlongShiftedCorners(matchedVertices);
+    }
 
     return true;
 }
@@ -450,17 +465,17 @@ void SimpleARClass::DrawMatchedKeypoints(std::vector<cv::KeyPoint> keyPoints){
 void SimpleARClass::TrackKeypointsAndUpdatePose() {
 
     // Use inliers as reference points
-    sourceInlierPoints  = Keypoint2Point(sourceInlierKeypoints);
-    queryInlierPoints   = Keypoint2Point(queryInlierKeypoints);
+    sourceInlierPoints = Keypoint2Point(sourceInlierKeypoints);
+    queryInlierPoints = Keypoint2Point(queryInlierKeypoints);
     int num_reference_pts = sourceInlierKeypoints.size();
 
     // Project inlier points onto an imaginary wall to get their 3D locations
     sourceKeypointLocationsIn3D.clear();
     sourceKeypointLocationsIn3D = myGLCamera->GetProjectedPointsOnWall(sourceInlierPoints,
-                                                                        sourceGravityVector,
-                                                                        CAM_DISTANCE_FROM_WALL,
-                                                                        cameraImageForBack.cols,
-                                                                        cameraImageForBack.rows);
+                                                                       sourceGravityVector,
+                                                                       CAM_DISTANCE_FROM_WALL,
+                                                                       cameraImageForBack.cols,
+                                                                       cameraImageForBack.rows);
 
     // construct the camera intrinsic matrix
     cv::Mat cameraMatrix = myGLCamera->ConstructCameraIntrinsicMatForCV(cameraImageForBack.cols,
@@ -480,10 +495,9 @@ void SimpleARClass::TrackKeypointsAndUpdatePose() {
     newPnpResult = true; // indicate to render loop that a new result is available
     pnpMutex.unlock();
 
-    if(!pnpResultIsMatch) {
+    if (!pnpResultIsMatch) {
         MyLOGD("No solution to pnp!");
-    }
-    else{
+    } else {
         PrintCVMat(translationVector.t());
         PrintCVMat(rotationVector.t());
     }
